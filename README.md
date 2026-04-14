@@ -7,7 +7,7 @@ OAP defines a standard envelope format (`TaskEnvelope`) and a router that dispat
 ## Installation
 
 ```bash
-pip install oap
+pip install open-agent-protocol
 ```
 
 ## Quick start
@@ -34,20 +34,55 @@ print(result.memory["last_result"])
 # Create a new task envelope
 oap init "research the best vector databases" --output task.json
 
-# Route it to an HTTP agent
-oap register research-agent http://localhost:9000 --capabilities "research,search" task.json --output result.json
+# Register an HTTP agent in the local registry
+oap register research-agent http://localhost:9000 --capabilities "research,search,find"
 
-# Inspect the result
+# Route the envelope to the best matching agent
+oap route task.json --output result.json
+
+# Automatically follow handoffs until the task is complete
+oap chain task.json --output final.json
+
+# Inspect an envelope
 oap inspect result.json
 
 # Validate envelope structure
 oap validate result.json
 
-# Route using built-in demo agents
-oap route task.json
-
-# List demo agents
+# List all registered agents
 oap agents
+
+# Remove an agent from the registry
+oap unregister research-agent
+```
+
+## Chaining agents
+
+When an agent sets a `handoff.next_agent` on its response, `oap chain` automatically routes to the next agent and keeps going until the task is complete or a hop limit is reached.
+
+```python
+# Python API
+result, visited = await router.chain(envelope, max_hops=10)
+print(" → ".join(visited))  # e.g. research-agent → summarise-agent
+```
+
+```bash
+# CLI — follows handoffs automatically, prints each hop
+oap chain task.json --output final.json --max-hops 5
+```
+
+The chain stops when:
+- An agent returns a response with no `handoff` set, or
+- `max_hops` is reached (default: 10)
+
+## Registry
+
+Agents are stored in `~/.oap/agents.json` and persist across commands.
+
+```bash
+oap register my-agent http://localhost:9000 --capabilities "research,find"
+oap agents       # list all registered agents
+oap unregister my-agent
 ```
 
 ## Concepts

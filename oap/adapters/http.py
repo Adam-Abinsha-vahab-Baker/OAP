@@ -27,12 +27,14 @@ class HTTPAdapter(AgentAdapter):
         if "result" in agent_output:
             updated.memory["last_result"] = agent_output["result"]
 
-        if "handoff" in agent_output and agent_output["handoff"]:
+        if agent_output.get("handoff"):
             h = agent_output["handoff"]
             updated.with_handoff(
                 next_agent=h["next_agent"],
                 reason=h.get("reason", ""),
                 partial_result=h.get("partial_result"),
             )
+        else:
+            updated.handoff = None
 
         return updated

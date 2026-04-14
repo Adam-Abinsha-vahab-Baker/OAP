@@ -10,8 +10,7 @@ from rich.table import Table
 
 from oap.envelope import TaskEnvelope
 from oap.router import OAPRouter, RoutingError
-from oap.adapters.mock import MockAgentAdapter
-from oap.adapters.http import HTTPAdapter
+from oap import registry
 
 app = typer.Typer(
     name="oap",
@@ -19,22 +18,6 @@ app = typer.Typer(
     add_completion=False,
 )
 console = Console()
-
-
-def _build_demo_router() -> OAPRouter:
-    """A router pre-loaded with mock agents for local testing."""
-    router = OAPRouter()
-    router.register(
-        "research-agent",
-        MockAgentAdapter("research-agent", response="Found 5 relevant sources."),
-        capabilities=["research", "find", "search", "summarise"],
-    )
-    router.register(
-        "coding-agent",
-        MockAgentAdapter("coding-agent", response="Code written and tested."),
-        capabilities=["code", "implement", "debug", "refactor"],
-    )
-    return router
 
 
 @app.command()
@@ -106,12 +89,37 @@ def validate(
 
 
 @app.command()
+def register(
+    agent_id: str = typer.Argument(..., help="Unique name for this agent"),
+    url: str = typer.Argument(..., help="Base URL of the agent's HTTP server"),
+    capabilities: str = typer.Option(..., "--capabilities", "-c", help="Comma-separated capability keywords"),
+):
+    """Register an HTTP agent in the local registry (~/.oap/agents.json)."""
+    caps = [c.strip() for c in capabilities.split(",")]
+    registry.add(agent_id, url, caps)
+    console.print(f"[green]Registered[/green] [cyan]{agent_id}[/cyan] → {url}")
+    console.print(f"[dim]Capabilities:[/dim] {', '.join(caps)}")
+
+
+@app.command()
+def unregister(
+    agent_id: str = typer.Argument(..., help="Agent ID to remove"),
+):
+    """Remove an agent from the local registry."""
+    if registry.remove(agent_id):
+        console.print(f"[green]Removed[/green] [cyan]{agent_id}[/cyan]")
+    else:
+        console.print(f"[red]Agent not found:[/red] {agent_id}")
+        raise typer.Exit(1)
+
+
+@app.command()
 def route(
     file: Path = typer.Argument(..., help="Path to a TaskEnvelope JSON file"),
     output: Optional[Path] = typer.Option(None, "--output", "-o", help="Save result envelope to file"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show which agent would handle it, without invoking"),
 ):
-    """Route a TaskEnvelope to the appropriate agent."""
+    """Route a TaskEnvelope to the best matching agent in the registry."""
     if not file.exists():
         console.print(f"[red]File not found: {file}[/red]")
         raise typer.Exit(1)
@@ -122,7 +130,7 @@ def route(
         console.print(f"[red]Invalid envelope: {e}[/red]")
         raise typer.Exit(1)
 
-    router = _build_demo_router()
+    router = registry.load_router()
 
     try:
         agent_id = router.select_agent(envelope)
@@ -144,15 +152,14 @@ def route(
         output.write_text(json_str)
         console.print(f"\n[green]Saved to {output}[/green]")
 
+
 @app.command()
-def register(
-    agent_id: str = typer.Argument(..., help="Unique name for this agent"),
-    url: str = typer.Argument(..., help="Base URL of the agent's HTTP server"),
-    capabilities: str = typer.Option(..., "--capabilities", "-c", help="Comma-separated capability keywords"),
-    file: Path = typer.Argument(..., help="Envelope file to route"),
-    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Save result envelope to file"),
+def chain(
+    file: Path = typer.Argument(..., help="Path to a TaskEnvelope JSON file"),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Save final envelope to file"),
+    max_hops: int = typer.Option(10, "--max-hops", help="Maximum number of agent hops before stopping"),
 ):
-    """Route an envelope to a specific HTTP agent by URL."""
+    """Route a TaskEnvelope, automatically following handoffs until the task is complete."""
     if not file.exists():
         console.print(f"[red]File not found: {file}[/red]")
         raise typer.Exit(1)
@@ -163,12 +170,19 @@ def register(
         console.print(f"[red]Invalid envelope: {e}[/red]")
         raise typer.Exit(1)
 
-    caps = [c.strip() for c in capabilities.split(",")]
-    router = OAPRouter()
-    router.register(agent_id, HTTPAdapter(agent_id=agent_id, base_url=url), caps)
+    router = registry.load_router()
 
-    console.print(f"[dim]Routing to[/dim] [cyan]{agent_id}[/cyan] at [dim]{url}[/dim]...")
-    result = asyncio.run(router.route(envelope))
+    def on_hop(hop: int, agent_id: str) -> None:
+        console.print(f"  [dim]hop {hop}:[/dim] [cyan]{agent_id}[/cyan]")
+
+    try:
+        console.print(f"[bold]Chaining[/bold] (max {max_hops} hops)...")
+        result, visited = asyncio.run(router.chain(envelope, max_hops=max_hops, on_hop=on_hop))
+    except RoutingError as e:
+        console.print(f"[red]Routing failed:[/red] {e}")
+        raise typer.Exit(1)
+
+    console.print(f"\n[green]Done[/green] — {len(visited)} hop(s): {' → '.join(visited)}")
 
     json_str = result.model_dump_json(indent=2)
     console.print(Syntax(json_str, "json", theme="monokai"))
@@ -176,19 +190,26 @@ def register(
     if output:
         output.write_text(json_str)
         console.print(f"\n[green]Saved to {output}[/green]")
-        
+
+
 @app.command()
 def agents():
-    """List all registered agents and their capabilities."""
-    router = _build_demo_router()
+    """List all agents in the local registry."""
+    entries = registry.list_all()
+
+    if not entries:
+        console.print("[dim]No agents registered. Use [bold]oap register[/bold] to add one.[/dim]")
+        return
 
     table = Table(show_header=True, header_style="bold dim")
     table.add_column("Agent ID")
+    table.add_column("URL")
     table.add_column("Capabilities")
 
-    for entry in router.list_agents():
+    for entry in entries:
         table.add_row(
             f"[cyan]{entry['id']}[/cyan]",
+            entry["url"],
             ", ".join(entry["capabilities"]),
         )
 

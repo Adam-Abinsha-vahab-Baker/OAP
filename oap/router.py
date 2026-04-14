@@ -90,3 +90,38 @@ class OAPRouter:
             result=agent_output,
         )
         return result
+
+    async def chain(
+        self,
+        envelope: TaskEnvelope,
+        max_hops: int = 10,
+        on_hop: object = None,
+    ) -> tuple[TaskEnvelope, list[str]]:
+        """Route repeatedly, following handoffs until none remains or max_hops is reached.
+
+        Args:
+            envelope: The starting TaskEnvelope.
+            max_hops: Hard ceiling on the number of agent calls.
+            on_hop: Optional callable(hop_number, agent_id) invoked after each hop.
+
+        Returns:
+            A tuple of (final_envelope, list_of_agent_ids_visited).
+        """
+        current = envelope
+        visited: list[str] = []
+
+        for hop in range(1, max_hops + 1):
+            agent_id = self.select_agent(current)
+            current = await self.route(current)
+            visited.append(agent_id)
+
+            if on_hop:
+                on_hop(hop, agent_id)  # type: ignore[operator]
+
+            if not current.handoff:
+                break
+        else:
+            # Exited loop because max_hops was reached without handoff clearing
+            pass
+
+        return current, visited

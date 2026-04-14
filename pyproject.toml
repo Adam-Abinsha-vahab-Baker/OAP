@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "oap"
-version = "0.1.0"
+name = "open-agent-protocol"
+version = "0.2.0"
 description = "Open Agent Protocol — a routing layer for inter-agent task handoff"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -30,8 +30,8 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/oap-project/oap"
-Issues = "https://github.com/oap-project/oap/issues"
+Repository = "https://github.com/Adam-Abinsha-vahab-Baker/OAP"
+Issues = "https://github.com/Adam-Abinsha-vahab-Baker/OAP/issues"
 
 [project.scripts]
 oap = "oap.cli:app"
@@ -45,3 +45,6 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+[tool.hatch.build.targets.wheel]
+packages = ["oap"]
