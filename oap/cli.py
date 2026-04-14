@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import time
 from pathlib import Path
@@ -22,6 +24,29 @@ app = typer.Typer(
 console = Console()
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+async def _fetch_agent_info(url: str, timeout: float = 5.0) -> dict | None:
+    """Hit GET / on an agent URL. Returns parsed JSON or None on failure."""
+    transport = HTTPTransport(base_url=url, timeout=timeout)
+    try:
+        response = await transport.get("/")
+        if response.status_code == 200:
+            try:
+                return response.json()
+            except Exception:
+                return None
+    except (httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout):
+        pass
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
 @app.command()
 def init(
     goal: str = typer.Argument(..., help="The task goal for this envelope"),
@@ -30,9 +55,7 @@ def init(
     """Create a new TaskEnvelope and print it."""
     envelope = TaskEnvelope(goal=goal)
     json_str = envelope.model_dump_json(indent=2)
-
     console.print(Syntax(json_str, "json", theme="monokai"))
-
     if output:
         output.write_text(json_str)
         console.print(f"\n[green]Saved to {output}[/green]")
@@ -94,14 +117,48 @@ def validate(
 def register(
     agent_id: str = typer.Argument(..., help="Unique name for this agent"),
     url: str = typer.Argument(..., help="Base URL of the agent's HTTP server"),
-    capabilities: str = typer.Option(..., "--capabilities", "-c", help="Comma-separated capability keywords"),
+    capabilities: Optional[str] = typer.Option(None, "--capabilities", "-c", help="Comma-separated capability keywords (fallback if GET / returns none)"),
     timeout: float = typer.Option(60.0, "--timeout", "-t", help="Request timeout in seconds"),
 ):
-    """Register an HTTP agent in the local registry (~/.oap/agents.json)."""
-    caps = [c.strip() for c in capabilities.split(",")]
-    registry.add(agent_id, url, caps, timeout=timeout)
-    console.print(f"[green]Registered[/green] [cyan]{agent_id}[/cyan] → {url}")
-    console.print(f"[dim]Capabilities:[/dim] {', '.join(caps)}")
+    """Register an HTTP agent. Discovers capabilities automatically from GET /."""
+    info = asyncio.run(_fetch_agent_info(url, timeout=timeout))
+
+    discovered_caps: list[str] = []
+    description = ""
+    source = "manual"
+
+    if info and info.get("capabilities"):
+        discovered_caps = [c.strip() for c in info["capabilities"]]
+        description = info.get("description", "")
+        source = "discovered"
+        console.print(f"[dim]Discovered from agent:[/dim] capabilities={discovered_caps}")
+        if description:
+            console.print(f"[dim]Description:[/dim] {description}")
+    elif capabilities:
+        discovered_caps = [c.strip() for c in capabilities.split(",")]
+    else:
+        # GET / either failed or returned no capabilities — and no --capabilities given
+        if info is None:
+            console.print(
+                f"[red]Agent at {url} has no GET / endpoint.[/red]\n"
+                f"Add one that returns {{agent_id, capabilities, description}} "
+                f"or pass [bold]--capabilities[/bold] manually."
+            )
+        else:
+            console.print(
+                f"[red]Agent at {url} returned no capabilities.[/red]\n"
+                f"Add a GET / endpoint that returns {{agent_id, capabilities, description}} "
+                f"or pass [bold]--capabilities[/bold] manually."
+            )
+        raise typer.Exit(1)
+
+    # Use agent_id from GET / response if present, otherwise use CLI argument
+    final_agent_id = (info or {}).get("agent_id") or agent_id
+
+    registry.add(final_agent_id, url, discovered_caps, timeout=timeout, description=description)
+
+    console.print(f"[green]Registered[/green] [cyan]{final_agent_id}[/cyan] → {url} [dim]({source})[/dim]")
+    console.print(f"[dim]Capabilities:[/dim] {', '.join(discovered_caps)}")
     console.print(f"[dim]Timeout:[/dim] {timeout}s")
 
 
@@ -216,7 +273,7 @@ def chain(
 
 @app.command()
 def ping():
-    """Check reachability of all registered agents."""
+    """Check reachability of all registered agents. Updates capabilities if changed."""
     entries = registry.list_all()
 
     if not entries:
@@ -229,17 +286,48 @@ def ping():
         try:
             response = await transport.get("/")
             elapsed = int((time.monotonic() - start) * 1000)
-            if response.status_code < 400:
-                return {"id": entry["id"], "status": "alive", "ms": elapsed, "ok": True}
-            return {"id": entry["id"], "status": "no health endpoint", "ms": elapsed, "ok": True}
+
+            if response.status_code >= 400:
+                return {
+                    "id": entry["id"], "status": "no health endpoint",
+                    "ms": elapsed, "ok": True,
+                    "caps_updated": False, "new_caps": None,
+                }
+
+            # Alive — check if capabilities changed
+            caps_updated = False
+            new_caps = None
+            try:
+                info = response.json()
+                remote_caps = info.get("capabilities")
+                remote_desc = info.get("description", "")
+                if remote_caps and sorted(remote_caps) != sorted(entry["capabilities"]):
+                    registry.add(
+                        entry["id"], entry["url"], remote_caps,
+                        timeout=entry["timeout"], description=remote_desc,
+                    )
+                    caps_updated = True
+                    new_caps = remote_caps
+            except Exception:
+                pass
+
+            return {
+                "id": entry["id"], "status": "alive",
+                "ms": elapsed, "ok": True,
+                "caps_updated": caps_updated, "new_caps": new_caps,
+            }
         except (httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout):
             elapsed = int((time.monotonic() - start) * 1000)
-            return {"id": entry["id"], "status": "dead", "ms": elapsed, "ok": False}
+            return {
+                "id": entry["id"], "status": "dead",
+                "ms": elapsed, "ok": False,
+                "caps_updated": False, "new_caps": None,
+            }
 
-    async def run_all() -> list[dict]:
+    async def _run_all() -> list[dict]:
         return await asyncio.gather(*[check(e) for e in entries])
 
-    results = asyncio.run(run_all())
+    results = asyncio.run(_run_all())
 
     table = Table(show_header=True, header_style="bold dim")
     table.add_column("Agent ID")
@@ -250,7 +338,8 @@ def ping():
     any_dead = False
     for res, entry in zip(results, entries):
         if res["status"] == "alive":
-            status_str = "[green]alive[/green]"
+            note = " [yellow](capabilities updated)[/yellow]" if res["caps_updated"] else ""
+            status_str = f"[green]alive[/green]{note}"
         elif res["status"] == "dead":
             status_str = "[red]dead[/red]"
             any_dead = True
@@ -284,6 +373,7 @@ def agents():
     table.add_column("URL")
     table.add_column("Capabilities")
     table.add_column("Timeout")
+    table.add_column("Description")
 
     for entry in entries:
         table.add_row(
@@ -291,6 +381,7 @@ def agents():
             entry["url"],
             ", ".join(entry["capabilities"]),
             f"{entry['timeout']}s",
+            entry.get("description", "") or "—",
         )
 
     console.print(table)

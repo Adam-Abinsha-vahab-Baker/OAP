@@ -26,9 +26,15 @@ def add(
     url: str,
     capabilities: list[str],
     timeout: float = _DEFAULT_TIMEOUT,
+    description: str = "",
 ) -> None:
     data = _load_raw()
-    data[agent_id] = {"url": url, "capabilities": capabilities, "timeout": timeout}
+    data[agent_id] = {
+        "url": url,
+        "capabilities": capabilities,
+        "timeout": timeout,
+        "description": description,
+    }
     _save_raw(data)
 
 
@@ -48,6 +54,7 @@ def list_all() -> list[dict]:
             "url": entry["url"],
             "capabilities": entry["capabilities"],
             "timeout": entry.get("timeout", _DEFAULT_TIMEOUT),
+            "description": entry.get("description", ""),
         }
         for agent_id, entry in _load_raw().items()
     ]

@@ -34,7 +34,9 @@ print(result.memory["last_result"])
 # Create a new task envelope
 oap init "research the best vector databases" --output task.json
 
-# Register an HTTP agent in the local registry
+# Register an HTTP agent — OAP discovers capabilities automatically from GET /
+oap register research-agent http://localhost:9000
+# Falls back to manual capabilities if the agent has no GET / endpoint
 oap register research-agent http://localhost:9000 --capabilities "research,search,find"
 
 # Route the envelope to the best matching agent
@@ -79,10 +81,33 @@ The chain stops when:
 
 Agents are stored in `~/.oap/agents.json` and persist across commands.
 
+When an agent implements `GET /` returning `{agent_id, capabilities, description}`, registration is automatic:
+
 ```bash
+oap register my-agent http://localhost:9000
+# → OAP hits GET /, reads capabilities and description, saves everything
+
 oap register my-agent http://localhost:9000 --capabilities "research,find"
-oap agents       # list all registered agents
+# → fallback: use provided capabilities if GET / is unavailable
+
+oap agents          # list all registered agents with description column
+oap ping            # health-check all agents, auto-updates capabilities if changed
 oap unregister my-agent
+```
+
+### Agent health endpoint
+
+Add `GET /` to your agent to enable self-registration and health checks:
+
+```python
+@app.get("/")
+async def info():
+    return {
+        "agent_id": "my-agent",
+        "capabilities": ["research", "find", "search"],
+        "description": "Researches topics and returns structured findings.",
+        "status": "ok",
+    }
 ```
 
 ## Concepts

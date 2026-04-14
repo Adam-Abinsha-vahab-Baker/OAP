@@ -21,6 +21,7 @@ def test_add_and_list():
         "url": "http://localhost:9000",
         "capabilities": ["research", "find"],
         "timeout": 60.0,
+        "description": "",
     }
 
 
