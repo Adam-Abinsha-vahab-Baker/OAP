@@ -20,6 +20,7 @@ def test_add_and_list():
         "id": "agent-a",
         "url": "http://localhost:9000",
         "capabilities": ["research", "find"],
+        "timeout": 60.0,
     }
 
 

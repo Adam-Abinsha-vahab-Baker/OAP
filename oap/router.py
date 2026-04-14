@@ -125,3 +125,48 @@ class OAPRouter:
             pass
 
         return current, visited
+
+    async def run_pipeline(
+        self,
+        envelope: TaskEnvelope,
+        agent_ids: list[str],
+        on_hop: object = None,
+    ) -> tuple[TaskEnvelope, list[str]]:
+        """Route through a fixed ordered list of agents, ignoring capability matching and handoffs.
+
+        Args:
+            envelope: The starting TaskEnvelope.
+            agent_ids: Ordered list of agent IDs to invoke in sequence.
+            on_hop: Optional callable(hop_number, total, agent_id) invoked after each hop.
+
+        Raises:
+            RoutingError: If any agent_id is not registered.
+
+        Returns:
+            A tuple of (final_envelope, agent_ids).
+        """
+        missing = [aid for aid in agent_ids if aid not in self._agents]
+        if missing:
+            raise RoutingError(
+                f"Pipeline agent(s) not found in registry: {', '.join(missing)}"
+            )
+
+        current = envelope
+        total = len(agent_ids)
+
+        for hop, agent_id in enumerate(agent_ids, 1):
+            adapter = self._agents[agent_id]
+            agent_input = adapter.to_agent_format(current)
+            agent_output = await adapter.invoke(agent_input)
+            current = adapter.to_envelope(agent_output, current)
+            current.handoff = None  # pipeline ignores handoffs
+            current.add_step(
+                agent_id=agent_id,
+                action=f"Pipeline hop {hop}/{total}: {agent_id}",
+                result=agent_output,
+            )
+
+            if on_hop:
+                on_hop(hop, total, agent_id)  # type: ignore[operator]
+
+        return current, agent_ids

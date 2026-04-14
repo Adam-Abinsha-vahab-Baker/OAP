@@ -1,8 +1,9 @@
 import asyncio
-import json
+import time
 from pathlib import Path
 from typing import Optional
 
+import httpx
 import typer
 from rich.console import Console
 from rich.syntax import Syntax
@@ -11,6 +12,7 @@ from rich.table import Table
 from oap.envelope import TaskEnvelope
 from oap.router import OAPRouter, RoutingError
 from oap import registry
+from oap.transport.http import HTTPTransport
 
 app = typer.Typer(
     name="oap",
@@ -93,12 +95,14 @@ def register(
     agent_id: str = typer.Argument(..., help="Unique name for this agent"),
     url: str = typer.Argument(..., help="Base URL of the agent's HTTP server"),
     capabilities: str = typer.Option(..., "--capabilities", "-c", help="Comma-separated capability keywords"),
+    timeout: float = typer.Option(60.0, "--timeout", "-t", help="Request timeout in seconds"),
 ):
     """Register an HTTP agent in the local registry (~/.oap/agents.json)."""
     caps = [c.strip() for c in capabilities.split(",")]
-    registry.add(agent_id, url, caps)
+    registry.add(agent_id, url, caps, timeout=timeout)
     console.print(f"[green]Registered[/green] [cyan]{agent_id}[/cyan] → {url}")
     console.print(f"[dim]Capabilities:[/dim] {', '.join(caps)}")
+    console.print(f"[dim]Timeout:[/dim] {timeout}s")
 
 
 @app.command()
@@ -158,8 +162,12 @@ def chain(
     file: Path = typer.Argument(..., help="Path to a TaskEnvelope JSON file"),
     output: Optional[Path] = typer.Option(None, "--output", "-o", help="Save final envelope to file"),
     max_hops: int = typer.Option(10, "--max-hops", help="Maximum number of agent hops before stopping"),
+    pipeline: Optional[str] = typer.Option(None, "--pipeline", help="Comma-separated list of agent IDs to invoke in order, bypassing capability matching"),
 ):
-    """Route a TaskEnvelope, automatically following handoffs until the task is complete."""
+    """Route a TaskEnvelope, automatically following handoffs until the task is complete.
+
+    Use --pipeline to force a fixed sequence of agents regardless of handoffs.
+    """
     if not file.exists():
         console.print(f"[red]File not found: {file}[/red]")
         raise typer.Exit(1)
@@ -172,12 +180,26 @@ def chain(
 
     router = registry.load_router()
 
-    def on_hop(hop: int, agent_id: str) -> None:
-        console.print(f"  [dim]hop {hop}:[/dim] [cyan]{agent_id}[/cyan]")
-
     try:
-        console.print(f"[bold]Chaining[/bold] (max {max_hops} hops)...")
-        result, visited = asyncio.run(router.chain(envelope, max_hops=max_hops, on_hop=on_hop))
+        if pipeline:
+            agent_ids = [a.strip() for a in pipeline.split(",")]
+            total = len(agent_ids)
+
+            def on_pipeline_hop(hop: int, tot: int, agent_id: str) -> None:
+                console.print(f"  [dim]hop {hop}/{tot}[/dim] → [cyan]{agent_id}[/cyan]")
+
+            console.print(f"[bold]Pipeline[/bold] ({total} agent(s))...")
+            result, visited = asyncio.run(
+                router.run_pipeline(envelope, agent_ids, on_hop=on_pipeline_hop)
+            )
+        else:
+            def on_hop(hop: int, agent_id: str) -> None:
+                console.print(f"  [dim]hop {hop}:[/dim] [cyan]{agent_id}[/cyan]")
+
+            console.print(f"[bold]Chaining[/bold] (max {max_hops} hops)...")
+            result, visited = asyncio.run(
+                router.chain(envelope, max_hops=max_hops, on_hop=on_hop)
+            )
     except RoutingError as e:
         console.print(f"[red]Routing failed:[/red] {e}")
         raise typer.Exit(1)
@@ -193,6 +215,62 @@ def chain(
 
 
 @app.command()
+def ping():
+    """Check reachability of all registered agents."""
+    entries = registry.list_all()
+
+    if not entries:
+        console.print("[dim]No agents registered.[/dim]")
+        return
+
+    async def check(entry: dict) -> dict:
+        transport = HTTPTransport(base_url=entry["url"], timeout=5.0)
+        start = time.monotonic()
+        try:
+            response = await transport.get("/")
+            elapsed = int((time.monotonic() - start) * 1000)
+            if response.status_code < 400:
+                return {"id": entry["id"], "status": "alive", "ms": elapsed, "ok": True}
+            return {"id": entry["id"], "status": "no health endpoint", "ms": elapsed, "ok": True}
+        except (httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout):
+            elapsed = int((time.monotonic() - start) * 1000)
+            return {"id": entry["id"], "status": "dead", "ms": elapsed, "ok": False}
+
+    async def run_all() -> list[dict]:
+        return await asyncio.gather(*[check(e) for e in entries])
+
+    results = asyncio.run(run_all())
+
+    table = Table(show_header=True, header_style="bold dim")
+    table.add_column("Agent ID")
+    table.add_column("URL")
+    table.add_column("Status")
+    table.add_column("ms", justify="right")
+
+    any_dead = False
+    for res, entry in zip(results, entries):
+        if res["status"] == "alive":
+            status_str = "[green]alive[/green]"
+        elif res["status"] == "dead":
+            status_str = "[red]dead[/red]"
+            any_dead = True
+        else:
+            status_str = "[dim]no health endpoint[/dim]"
+
+        table.add_row(
+            f"[cyan]{res['id']}[/cyan]",
+            entry["url"],
+            status_str,
+            str(res["ms"]),
+        )
+
+    console.print(table)
+
+    if any_dead:
+        raise typer.Exit(1)
+
+
+@app.command()
 def agents():
     """List all agents in the local registry."""
     entries = registry.list_all()
@@ -205,12 +283,14 @@ def agents():
     table.add_column("Agent ID")
     table.add_column("URL")
     table.add_column("Capabilities")
+    table.add_column("Timeout")
 
     for entry in entries:
         table.add_row(
             f"[cyan]{entry['id']}[/cyan]",
             entry["url"],
             ", ".join(entry["capabilities"]),
+            f"{entry['timeout']}s",
         )
 
     console.print(table)
