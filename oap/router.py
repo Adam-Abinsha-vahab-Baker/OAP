@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 from oap.envelope import TaskEnvelope
 from oap.adapters.base import AgentAdapter
+from oap.llm.base import LLMProvider
 
 
 class RoutingError(Exception):
@@ -11,14 +12,17 @@ class RoutingError(Exception):
 
 
 class OAPRouter:
-    def __init__(self):
+    def __init__(self, llm_provider: LLMProvider | None = None):
         self._agents: dict[str, AgentAdapter] = {}
         self._capabilities: dict[str, list[str]] = {}
+        self._descriptions: dict[str, str] = {}
+        self.llm_provider = llm_provider
 
-    def register(self, agent_id: str, adapter: AgentAdapter, capabilities: list[str]) -> None:
+    def register(self, agent_id: str, adapter: AgentAdapter, capabilities: list[str], description: str = "") -> None:
         """Register an agent with its capabilities."""
         self._agents[agent_id] = adapter
         self._capabilities[agent_id] = [c.lower() for c in capabilities]
+        self._descriptions[agent_id] = description
 
     def list_agents(self) -> list[dict[str, Any]]:
         """Return all registered agents and their capabilities."""
@@ -27,13 +31,14 @@ class OAPRouter:
             for agent_id, caps in self._capabilities.items()
         ]
 
-    def select_agent(self, envelope: TaskEnvelope) -> str:
+    async def select_agent(self, envelope: TaskEnvelope) -> str:
         """Pick the best agent for this envelope.
 
         Priority:
         1. Explicit handoff.next_agent in the envelope
-        2. Capability match against goal keywords (most matches wins)
-        3. Raise RoutingError if nothing matches or there is a tie
+        2. LLM routing (if provider is set and available)
+        3. Capability match against goal keywords (most matches wins)
+        4. Raise RoutingError if nothing matches or there is a tie
         """
         if envelope.handoff and envelope.handoff.next_agent:
             agent_id = envelope.handoff.next_agent
@@ -41,7 +46,34 @@ class OAPRouter:
                 raise RoutingError(f"Requested agent '{agent_id}' is not registered.")
             return agent_id
 
+        if self.llm_provider and self.llm_provider.is_available():
+            try:
+                return await self._match_by_llm(envelope.goal)
+            except Exception as e:
+                print(f"[oap] LLM routing failed ({e}), falling back to keyword matching.")
+                return self._match_by_capability(envelope.goal)
+
         return self._match_by_capability(envelope.goal)
+
+    async def _match_by_llm(self, goal: str) -> str:
+        """Use LLM to pick the best agent."""
+        from oap.llm.router_prompt import build_prompt
+        agents = [
+            {"id": aid, "description": self._descriptions.get(aid, ""), "capabilities": caps}
+            for aid, caps in self._capabilities.items()
+        ]
+        prompt = build_prompt(goal, agents)
+        response = await self.llm_provider.complete(prompt)
+        response = response.strip()
+
+        if response == "NO_MATCH":
+            raise RoutingError("LLM found no suitable agent for the goal.")
+
+        if response not in self._agents:
+            print(f"[oap] LLM returned unknown agent '{response}', falling back to keyword matching.")
+            return self._match_by_capability(goal)
+
+        return response
 
     def _match_by_capability(self, goal: str) -> str:
         """Score each agent by how many capability keywords appear in the goal."""
@@ -77,7 +109,7 @@ class OAPRouter:
 
     async def route(self, envelope: TaskEnvelope) -> TaskEnvelope:
         """Route an envelope to the correct agent and return the updated envelope."""
-        agent_id = self.select_agent(envelope)
+        agent_id = await self.select_agent(envelope)
         adapter = self._agents[agent_id]
 
         agent_input = adapter.to_agent_format(envelope)
@@ -97,21 +129,12 @@ class OAPRouter:
         max_hops: int = 10,
         on_hop: object = None,
     ) -> tuple[TaskEnvelope, list[str]]:
-        """Route repeatedly, following handoffs until none remains or max_hops is reached.
-
-        Args:
-            envelope: The starting TaskEnvelope.
-            max_hops: Hard ceiling on the number of agent calls.
-            on_hop: Optional callable(hop_number, agent_id) invoked after each hop.
-
-        Returns:
-            A tuple of (final_envelope, list_of_agent_ids_visited).
-        """
+        """Route repeatedly, following handoffs until none remains or max_hops is reached."""
         current = envelope
         visited: list[str] = []
 
         for hop in range(1, max_hops + 1):
-            agent_id = self.select_agent(current)
+            agent_id = await self.select_agent(current)
             current = await self.route(current)
             visited.append(agent_id)
 
@@ -121,7 +144,6 @@ class OAPRouter:
             if not current.handoff:
                 break
         else:
-            # Exited loop because max_hops was reached without handoff clearing
             pass
 
         return current, visited
@@ -132,19 +154,7 @@ class OAPRouter:
         agent_ids: list[str],
         on_hop: object = None,
     ) -> tuple[TaskEnvelope, list[str]]:
-        """Route through a fixed ordered list of agents, ignoring capability matching and handoffs.
-
-        Args:
-            envelope: The starting TaskEnvelope.
-            agent_ids: Ordered list of agent IDs to invoke in sequence.
-            on_hop: Optional callable(hop_number, total, agent_id) invoked after each hop.
-
-        Raises:
-            RoutingError: If any agent_id is not registered.
-
-        Returns:
-            A tuple of (final_envelope, agent_ids).
-        """
+        """Route through a fixed ordered list of agents, ignoring capability matching and handoffs."""
         missing = [aid for aid in agent_ids if aid not in self._agents]
         if missing:
             raise RoutingError(

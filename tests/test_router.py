@@ -27,45 +27,45 @@ def test_list_agents():
     assert "coding-agent" in ids
 
 
-def test_capability_match_research():
+async def test_capability_match_research():
     router = make_router()
     e = TaskEnvelope(goal="research the best vector databases")
-    assert router.select_agent(e) == "research-agent"
+    assert await router.select_agent(e) == "research-agent"
 
 
-def test_capability_match_coding():
+async def test_capability_match_coding():
     router = make_router()
     e = TaskEnvelope(goal="implement a quick sort algorithm")
-    assert router.select_agent(e) == "coding-agent"
+    assert await router.select_agent(e) == "coding-agent"
 
 
-def test_explicit_handoff_overrides_capability():
+async def test_explicit_handoff_overrides_capability():
     router = make_router()
     e = TaskEnvelope(goal="research something")
     e.with_handoff(next_agent="coding-agent", reason="user override")
-    assert router.select_agent(e) == "coding-agent"
+    assert await router.select_agent(e) == "coding-agent"
 
 
-def test_no_match_raises_routing_error():
+async def test_no_match_raises_routing_error():
     router = make_router()
     e = TaskEnvelope(goal="make me a sandwich")
     with pytest.raises(RoutingError):
-        router.select_agent(e)
+        await router.select_agent(e)
 
 
-def test_empty_router_raises_routing_error():
+async def test_empty_router_raises_routing_error():
     router = OAPRouter()
     e = TaskEnvelope(goal="research something")
     with pytest.raises(RoutingError, match="No agents are registered"):
-        router.select_agent(e)
+        await router.select_agent(e)
 
 
-def test_unknown_handoff_agent_raises_routing_error():
+async def test_unknown_handoff_agent_raises_routing_error():
     router = make_router()
     e = TaskEnvelope(goal="do something")
     e.with_handoff(next_agent="nonexistent-agent", reason="test")
     with pytest.raises(RoutingError):
-        router.select_agent(e)
+        await router.select_agent(e)
 
 
 async def test_route_updates_memory():

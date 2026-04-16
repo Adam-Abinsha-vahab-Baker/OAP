@@ -9,7 +9,7 @@ class MockAgentAdapter(AgentAdapter):
 
     def __init__(
         self,
-        agent_id: str,
+        agent_id: str = "mock",
         response: str = "Mock result",
         next_agent: str | None = None,
     ):
@@ -39,3 +39,4 @@ class MockAgentAdapter(AgentAdapter):
         else:
             updated.handoff = None
         return updated
+MockAdapter = MockAgentAdapter

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from oap.adapters.http import HTTPAdapter
 from oap.router import OAPRouter
+from oap.llm.factory import get_provider
 
 _REGISTRY_PATH = Path.home() / ".oap" / "agents.json"
 _DEFAULT_TIMEOUT = 60.0
@@ -61,12 +62,14 @@ def list_all() -> list[dict]:
 
 
 def load_router() -> OAPRouter:
-    router = OAPRouter()
+    provider = get_provider()
+    router = OAPRouter(llm_provider=provider)
     for agent_id, entry in _load_raw().items():
         timeout = entry.get("timeout", _DEFAULT_TIMEOUT)
         router.register(
             agent_id,
             HTTPAdapter(agent_id=agent_id, base_url=entry["url"], timeout=timeout),
             entry["capabilities"],
+            description=entry.get("description", ""),
         )
     return router

@@ -15,6 +15,8 @@ from oap.envelope import TaskEnvelope
 from oap.router import OAPRouter, RoutingError
 from oap import registry
 from oap.transport.http import HTTPTransport
+from oap import config as oap_config
+from oap.llm.factory import get_provider
 
 app = typer.Typer(
     name="oap",
@@ -194,7 +196,7 @@ def route(
     router = registry.load_router()
 
     try:
-        agent_id = router.select_agent(envelope)
+        agent_id = asyncio.run(router.select_agent(envelope))
     except RoutingError as e:
         console.print(f"[red]Routing failed:[/red] {e}")
         raise typer.Exit(1)
@@ -385,3 +387,96 @@ def agents():
         )
 
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# Config subcommand group
+# ---------------------------------------------------------------------------
+
+config_app = typer.Typer(name="config", help="Manage OAP configuration.")
+app.add_typer(config_app)
+
+VALID_PROVIDERS = ["bedrock", "openai", "ollama", "custom"]
+
+_PROVIDER_AUTH_HINTS = {
+    "bedrock": "AWS credentials (AWS_DEFAULT_REGION, AWS credentials on machine via boto3)",
+    "openai": "Set OPENAI_API_KEY or OAP_OPENAI_API_KEY",
+    "ollama": "No API key needed — set OAP_OLLAMA_URL if not using http://localhost:11434",
+    "custom": "Set OAP_CUSTOM_BASE_URL, OAP_CUSTOM_MODEL, and optionally OAP_CUSTOM_API_KEY",
+}
+
+_PROVIDER_ENV_VARS = {
+    "bedrock": [],
+    "openai": ["OPENAI_API_KEY", "OAP_OPENAI_API_KEY"],
+    "ollama": ["OAP_OLLAMA_URL"],
+    "custom": ["OAP_CUSTOM_BASE_URL", "OAP_CUSTOM_MODEL", "OAP_CUSTOM_API_KEY"],
+}
+
+
+def _mask(value: str) -> str:
+    return value[:8] + "..." if len(value) > 8 else value + "..."
+
+
+@config_app.command("show")
+def config_show():
+    """Show current LLM configuration and relevant environment variables."""
+    import os
+    cfg = oap_config.get_llm_config()
+    if cfg:
+        console.print("[bold]LLM Configuration:[/bold]")
+        console.print(f"  provider: [cyan]{cfg.get('provider')}[/cyan]")
+        if cfg.get("model"):
+            console.print(f"  model:    [cyan]{cfg.get('model')}[/cyan]")
+        provider = cfg.get("provider", "")
+        env_vars = _PROVIDER_ENV_VARS.get(provider, [])
+        if env_vars:
+            console.print("\n[bold]Relevant environment variables:[/bold]")
+            for var in env_vars:
+                val = os.environ.get(var)
+                if val:
+                    console.print(f"  {var}=[green]{_mask(val)}[/green]")
+                else:
+                    console.print(f"  {var}=[dim]not set[/dim]")
+    else:
+        console.print("No LLM provider configured. Using keyword matching.")
+
+
+@config_app.command("set-llm")
+def config_set_llm(
+    provider: str = typer.Argument(..., help="LLM provider name"),
+    model: Optional[str] = typer.Option(None, "--model", help="Model name"),
+):
+    """Configure the LLM provider for intelligent routing."""
+    if provider not in VALID_PROVIDERS:
+        console.print(f"[red]Invalid provider '{provider}'. Choose from: {', '.join(VALID_PROVIDERS)}[/red]")
+        raise typer.Exit(1)
+    oap_config.set_llm_config(provider, model)
+    console.print(f"[green]LLM provider set to[/green] [cyan]{provider}[/cyan]" + (f" (model: {model})" if model else ""))
+    hint = _PROVIDER_AUTH_HINTS.get(provider, "")
+    if hint:
+        console.print(f"[dim]Auth:[/dim] {hint}")
+
+
+@config_app.command("clear-llm")
+def config_clear_llm():
+    """Clear the LLM provider configuration."""
+    oap_config.clear_llm_config()
+    console.print("[green]LLM configuration cleared.[/green] Routing will use keyword matching.")
+
+
+@config_app.command("test-llm")
+def config_test_llm():
+    """Test the configured LLM provider by sending a test prompt."""
+    provider = get_provider()
+    if provider is None:
+        console.print("[red]No LLM provider configured. Run 'oap config set-llm' first.[/red]")
+        raise typer.Exit(1)
+    if not provider.is_available():
+        console.print("[red]LLM provider is not available. Check credentials/configuration.[/red]")
+        raise typer.Exit(1)
+    try:
+        result = asyncio.run(provider.complete("Reply with the word READY and nothing else."))
+        console.print(f"[green]LLM provider is working.[/green] Response: {result}")
+    except Exception as e:
+        console.print(f"[red]LLM provider error:[/red] {e}")
+        raise typer.Exit(1)
