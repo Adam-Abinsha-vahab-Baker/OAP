@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "open-agent-protocol"
-version = "0.2.5"
+version = "0.3.0"
 description = "Open Agent Protocol — a routing layer for inter-agent task handoff"
 readme = "README.md"
 requires-python = ">=3.11"
